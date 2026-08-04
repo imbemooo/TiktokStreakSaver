@@ -23,15 +23,19 @@ public static class TikTokWebViewHelper
 #if ANDROID
         MainThread.BeginInvokeOnMainThread(() =>
         {
-            if (webView.Handler?.PlatformView is Android.Webkit.WebView awv)
+            try
             {
-                awv.StopLoading();
-                awv.OnPause();
-                awv.PauseTimers();
-                awv.LoadUrl("about:blank");
+                FlushCookies();
+                if (webView.Handler?.PlatformView is Android.Webkit.WebView awv)
+                {
+                    awv.StopLoading();
+                    awv.OnPause();
+                    awv.PauseTimers();
+                    awv.LoadUrl("about:blank");
+                }
+                webView.Source = null;
             }
-            webView.Source = null;
-            webView.Handler?.DisconnectHandler();
+            catch { }
         });
 #elif IOS
         Platforms.iOS.Services.IosWebViewConfigurator.TearDownLoginWebView(webView);

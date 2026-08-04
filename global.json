@@ -1,8 +1,0 @@
-{
-  "sdk": {
-    "version": "9.0.314",
-    "workloadVersion": "9.0.314.3",
-    "rollForward": "latestFeature",
-    "allowPrerelease": false
-  }
-}

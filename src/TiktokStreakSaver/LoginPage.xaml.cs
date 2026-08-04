@@ -38,14 +38,17 @@ public partial class LoginPage : ContentPage
     private void LoadTikTok()
     {
         LoadingOverlay.IsVisible = true;
-
         var desktopUa = AppConstants.DesktopChromeUserAgent;
-#if ANDROID || IOS
+    #if ANDROID || IOS
         TikTokWebViewHelper.ConfigureWebView(TikTokWebView, desktopUa);
         _sessionService.SetLoginUserAgent(desktopUa);
-#endif
-
-        TikTokWebView.Source = TikTokWebViewHelper.LoginUrl;
+    #endif
+        // Antrikan SETELAH konfigurasi WebView selesai
+        MainThread.BeginInvokeOnMainThread(async () =>
+        {
+            await Task.Delay(200); // kasih waktu UA desktop diterapkan
+            TikTokWebView.Source = TikTokWebViewHelper.LoginUrl;
+        });
     }
 
     private async Task TryCompleteExistingSessionAsync()
@@ -103,9 +106,18 @@ public partial class LoginPage : ContentPage
     private async void OnBackClicked(object? sender, EventArgs e)
     {
         if (TikTokWebView.CanGoBack)
+        {
             TikTokWebView.GoBack();
+        }
         else
-            await Navigation.PopAsync();
+        {
+            if (Navigation.NavigationStack.Count > 1)
+                await Navigation.PopAsync();
+            else if (Navigation.ModalStack.Count > 0)
+                await Navigation.PopModalAsync();
+            else if (Shell.Current != null)
+                await Shell.Current.GoToAsync("//DashboardPage");
+        }
     }
 
     private void OnRefreshClicked(object? sender, EventArgs e)
@@ -128,8 +140,6 @@ public partial class LoginPage : ContentPage
             return;
         _completionInProgress = true;
 
-        TearDownLoginWebView();
-
         if (_isLoggedIn)
         {
             if (!_sessionService.TrySetSessionValid(true, out var persistError))
@@ -139,6 +149,10 @@ public partial class LoginPage : ContentPage
                     persistError ?? "Login succeeded but session state did not persist on this device.", "OK");
                 return;
             }
+
+#if ANDROID
+            TikTokWebViewHelper.FlushCookies();
+#endif
 
             AppStorageProvider.Current.SetBool(AppConstants.AuthRequiredKey, false);
 
@@ -166,7 +180,18 @@ public partial class LoginPage : ContentPage
                 await DisplayAlert("Logged In", body, "OK");
             }
 
-            await Navigation.PopAsync();
+            if (Navigation.NavigationStack.Count > 1)
+            {
+                await Navigation.PopAsync();
+            }
+            else if (Navigation.ModalStack.Count > 0)
+            {
+                await Navigation.PopModalAsync();
+            }
+            else if (Shell.Current != null)
+            {
+                await Shell.Current.GoToAsync("//DashboardPage");
+            }
         }
         else
         {
@@ -176,4 +201,28 @@ public partial class LoginPage : ContentPage
             _completionInProgress = false;
         }
     }
+
+    private void OnWebViewNavigating(object? sender, WebNavigatingEventArgs e)
+    {
+        // URL normal, biarkan load
+        if (e.Url != null && e.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        // Blokir snssdk1180://, intent://, dll
+        e.Cancel = true;
+
+        // Ambil URL asli dari params_url=https%3A%2F%2F... lalu muat ulang
+        const string key = "params_url=";
+        var idx = e.Url?.IndexOf(key, StringComparison.Ordinal) ?? -1;
+        if (idx >= 0)
+        {
+            var rest = e.Url!.Substring(idx + key.Length);
+            var amp = rest.IndexOf('&');
+            if (amp > 0) rest = rest.Substring(0, amp);
+            var decoded = Uri.UnescapeDataString(rest);
+            if (decoded.StartsWith("http"))
+                TikTokWebView.Source = decoded;
+        }
+    }
 }
+

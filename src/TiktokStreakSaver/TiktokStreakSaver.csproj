@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFrameworks>net9.0-android;net9.0-ios</TargetFrameworks>
+		<TargetFrameworks>net9.0-android</TargetFrameworks>
 
 		<OutputType>Exe</OutputType>
 		<RootNamespace>TiktokStreakSaver</RootNamespace>
@@ -39,6 +39,7 @@
 	<PropertyGroup Condition="$(TargetFramework.Contains('-android'))">
 		<!-- Android Minimum API Version (API 24 = Android 7.0) -->
 		<SupportedOSPlatformVersion>24.0</SupportedOSPlatformVersion>
+		<AndroidSdkDirectory Condition="'$(AndroidSdkDirectory)' == '' AND Exists('$(LOCALAPPDATA)\Android\Sdk')">$(LOCALAPPDATA)\Android\Sdk</AndroidSdkDirectory>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="$(TargetFramework.Contains('-ios'))">
