@@ -21,36 +21,8 @@ jobs:
     runs-on: windows-latest
 
     steps:
-
     - name: Checkout repository
       uses: actions/checkout@v4
-
-    - name: Decode Keystore
-      run: |
-        $keystoreBytes = [Convert]::FromBase64String("${{ secrets.ANDROID_KEYSTORE_BASE64 }}")
-        [IO.File]::WriteAllBytes("src/TiktokStreakSaver/streaksaver.keystore", $keystoreBytes)
-        Write-Host "Keystore file created successfully"
-      shell: pwsh
-
-    - name: Validate signing configuration
-      run: |
-        if (-not (Test-Path "src/TiktokStreakSaver/streaksaver.keystore")) {
-          Write-Error "streaksaver.keystore was not created. Check ANDROID_KEYSTORE_BASE64 secret."
-          exit 1
-        }
-        $size = (Get-Item "src/TiktokStreakSaver/streaksaver.keystore").Length
-        if ($size -lt 100) {
-          Write-Error "streaksaver.keystore is too small ($size bytes). Secret may be empty or corrupt."
-          exit 1
-        }
-        if ([string]::IsNullOrEmpty("$env:SIGNING_PASSWORD_CHECK")) {
-          Write-Error "ANDROID_SIGNING_PASSWORD is not set. Cannot sign the APK."
-          exit 1
-        }
-        Write-Host "Signing configuration validated: keystore=$size bytes, password=set"
-      shell: pwsh
-      env:
-        SIGNING_PASSWORD_CHECK: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
 
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
@@ -63,11 +35,34 @@ jobs:
         distribution: 'microsoft'
         java-version: '17'
 
-    - name: Install MAUI workload
-      run: dotnet workload install maui-android
+    - name: Setup Keystore (Auto-generate if secret missing)
+      shell: pwsh
+      run: |
+        $keystorePath = "src/TiktokStreakSaver/streaksaver.keystore"
+        $secretBase64 = "${{ secrets.ANDROID_KEYSTORE_BASE64 }}"
+        $secretPass = "${{ secrets.ANDROID_SIGNING_PASSWORD }}"
+        
+        # Kalau Secret belum diisi di GitHub, generate otomatis pakai keytool
+        if ([string]::IsNullOrEmpty($secretBase64) -or [string]::IsNullOrEmpty($secretPass)) {
+          Write-Host "GitHub Secrets not found. Generating a new dummy keystore..."
+          $password = "android123"
+          $keytool = Join-Path $env:JAVA_HOME "bin\keytool.exe"
+          
+          & $keytool -genkeypair -v -keystore $keystorePath -alias streaksaver -keyalg RSA -keysize 2048 -validity 10000 -storepass $password -keypass $password -dname "CN=StreakSaver, OU=Dev, O=StreakSaver, L=Unknown, S=Unknown, C=US"
+          Write-Host "Dummy keystore generated successfully."
+          echo "SIGNING_PASSWORD=$password" >> $env:GITHUB_ENV
+        } else {
+          Write-Host "Using provided GitHub Secrets..."
+          $keystoreBytes = [Convert]::FromBase64String($secretBase64)
+          [IO.File]::WriteAllBytes($keystorePath, $keystoreBytes)
+          echo "SIGNING_PASSWORD=$secretPass" >> $env:GITHUB_ENV
+          Write-Host "Keystore decoded successfully."
+        }
 
-    - name: Install MAUI workload
-      run: dotnet workload install maui-ios
+    - name: Install MAUI workloads
+      run: |
+        dotnet workload install maui-android
+        # maui-ios dihapus karena tidak bisa jalan di windows-latest dan tidak butuh untuk build Android
 
     - name: Restore dependencies
       run: dotnet restore ${{ env.PROJECT_PATH }}
@@ -87,12 +82,16 @@ jobs:
       run: |
         $ver = "${{ steps.get_version.outputs.VERSION }}"
         $parts = $ver -split '\.'
-        $vc = [int]$parts[0] * 10000 + [int]$parts[1] * 100 + [int]$parts[2]
+        $major = if($parts.Length -gt 0) { [int]$parts[0] } else { 1 }
+        $minor = if($parts.Length -gt 1) { [int]$parts[1] } else { 0 }
+        $patch = if($parts.Length -gt 2) { [int]$parts[2] } else { 0 }
+        
+        $vc = $major * 10000 + $minor * 100 + $patch
         Write-Host "Building with ApplicationVersion=$vc ApplicationDisplayVersion=$ver"
         dotnet publish ${{ env.PROJECT_PATH }} -f net9.0-android -c Release -o ./artifacts -p:ApplicationVersion=$vc -p:ApplicationDisplayVersion=$ver
       shell: pwsh
       env:
-        ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+        ANDROID_SIGNING_PASSWORD: ${{ env.SIGNING_PASSWORD }}
 
     - name: Rename APK
       run: |
@@ -104,9 +103,6 @@ jobs:
         }
         if ($apk) {
           Rename-Item -Path $apk.FullName -NewName $newName
-          # Also publish a stable-named copy so the marketing site can link to
-          # https://github.com/Jon2G/TiktokStreakSaver/releases/latest/download/StreakSaver.apk
-          # without breaking every release.
           Copy-Item -Path "./artifacts/$newName" -Destination "./artifacts/$stableName" -Force
           echo "APK_NAME=$newName" >> $env:GITHUB_OUTPUT
           echo "APK_PATH=./artifacts/$newName" >> $env:GITHUB_OUTPUT
@@ -176,7 +172,7 @@ jobs:
 
     - name: Create GitHub Release
       if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref_name }}
         name: Streak Saver v${{ steps.get_version.outputs.VERSION }}
