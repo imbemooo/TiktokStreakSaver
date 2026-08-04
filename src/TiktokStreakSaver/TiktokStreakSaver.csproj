@@ -52,11 +52,11 @@
 
 	<!-- Android Release Signing Configuration -->
 	<PropertyGroup Condition="$(TargetFramework.Contains('-android')) and '$(Configuration)' == 'Release'">
-		<AndroidKeyStore>true</AndroidKeyStore>
+		<!-- <AndroidKeyStore>true</AndroidKeyStore>
 		<AndroidSigningKeyStore>streaksaver.keystore</AndroidSigningKeyStore>
 		<AndroidSigningKeyAlias>streaksaver</AndroidSigningKeyAlias>
 		<AndroidSigningKeyPass>$(ANDROID_SIGNING_PASSWORD)</AndroidSigningKeyPass>
-		<AndroidSigningStorePass>$(ANDROID_SIGNING_PASSWORD)</AndroidSigningStorePass>
+		<AndroidSigningStorePass>$(ANDROID_SIGNING_PASSWORD)</AndroidSigningStorePass> -->
 		<AndroidPackageFormat>apk</AndroidPackageFormat>
 		<AndroidLinkTool>r8</AndroidLinkTool>
 	</PropertyGroup>
