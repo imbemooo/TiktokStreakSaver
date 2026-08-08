@@ -19,7 +19,6 @@ public class StreakService : Service
 {
     private const string ChannelId = "streak_service_channel";
     private const string ChannelName = "Streak Service";
-    /// <summary>Ongoing foreground + completion / offline alerts that should be visible (not Low importance).</summary>
     private const string StatusChannelId = "streak_status_channel";
     private const string StatusChannelName = "Streak status";
     private const int NotificationId = 1001;
@@ -45,14 +44,10 @@ public class StreakService : Service
     private bool _isCancelRequested = false;
     private bool _automationStarted = false;
 
-    // ── Run-level mutex: prevents concurrent automation sessions ──
+    // ── Run-level mutex ──
     private static volatile bool _isRunning = false;
     private static readonly object _runLock = new();
 
-    /// <summary>
-    /// True while an automation session is active. Checked by StreakScheduler.RunNow
-    /// and OnStartCommand to prevent overlapping runs.
-    /// </summary>
     public static bool IsRunning => _isRunning;
 
     private int _cooldownSkippedCount = 0;
@@ -84,7 +79,6 @@ public class StreakService : Service
     {
         base.OnCreate();
 
-        // Create notification channel FIRST before anything else
         CreateNotificationChannel();
         CreateStatusNotificationChannel();
 
@@ -92,7 +86,6 @@ public class StreakService : Service
         _settingsService = new SettingsService();
         AcquireWakeLock();
 
-        // Start foreground IMMEDIATELY in OnCreate to avoid ANR
         StartForegroundServiceImmediate();
     }
 
@@ -106,11 +99,8 @@ public class StreakService : Service
             return StartCommandResult.NotSticky;
         }
 
-        // Ensure we're in foreground mode (in case OnCreate didn't complete it)
         StartForegroundServiceImmediate();
 
-        // ── Run-level mutex: ignore duplicate starts while a session is active ──
-        // IMPORTANT: Do not StopSelf() here — a second start (e.g. alarm + Run now) would kill the in-flight run.
         lock (_runLock)
         {
             if (_isRunning)
@@ -121,11 +111,8 @@ public class StreakService : Service
             _isRunning = true;
         }
 
-        // Start the WebView automation on main thread
         _mainHandler?.Post(StartWebViewAutomation);
 
-        // Sticky: if Android kills the service mid-run, the system will recreate
-        // the service so the run can resume.
         return StartCommandResult.Sticky;
     }
 
@@ -137,7 +124,6 @@ public class StreakService : Service
 
             if (Build.VERSION.SdkInt >= BuildVersionCodes.Q)
             {
-                // Android 10+ requires specifying the foreground service type
                 StartForeground(NotificationId, notification, ForegroundService.TypeDataSync);
             }
             else
@@ -155,8 +141,6 @@ public class StreakService : Service
 
     public override void OnDestroy()
     {
-        // Safety net: release the run-level mutex if the service is destroyed
-        // without CompleteService being called (e.g. system kill while WebView is loading).
         lock (_runLock)
         {
             _isRunning = false;
@@ -170,7 +154,6 @@ public class StreakService : Service
     {
         var powerManager = (PowerManager?)GetSystemService(PowerService);
         _wakeLock = powerManager?.NewWakeLock(WakeLockFlags.Partial, "TiktokStreakSaver::StreakWakeLock");
-        // 30 minute ceiling — generous upper bound for a normal run with a large friend list.
         _wakeLock?.Acquire(30L * 60 * 1000);
     }
 
@@ -189,7 +172,6 @@ public class StreakService : Service
             var notificationManager = (NotificationManager?)GetSystemService(NotificationService);
             if (notificationManager == null) return;
 
-            // Check if channel already exists
             var existingChannel = notificationManager.GetNotificationChannel(ChannelId);
             if (existingChannel != null) return;
 
@@ -297,7 +279,6 @@ public class StreakService : Service
                 }
             }
 
-            // Initialize randomized message pool if user opted in.
             if (_settingsService?.GetRandomizeNormalMessages() == true)
             {
                 _shuffledNormalMessages = new List<string>(SettingsService.BuiltInStreakMessages);
@@ -357,8 +338,6 @@ public class StreakService : Service
                     _webView.Settings.LoadWithOverviewMode = false;
                     _webView.SetInitialScale(100);
 
-                    // Use density-independent pixels for layout so TikTok sees a
-                    // full-sized desktop viewport regardless of physical screen density.
                     var dm = Resources?.DisplayMetrics;
                     float density = dm?.Density ?? 2.0f;
                     int widthPx = (int)(1920 * density);
@@ -374,6 +353,7 @@ public class StreakService : Service
                     _webView.AddJavascriptInterface(new StreakJsInterface(this), "StreakApp");
                     _webView.LoadUrl("https://www.tiktok.com/messages?lang=en");
 
+                    // تم تقليل وقت التحقق الخفي للرابط
                     _mainHandler.PostDelayed(() =>
                     {
                         if (!(_webView?.Url ?? "").Contains("tiktok.com/messages"))
@@ -385,9 +365,9 @@ public class StreakService : Service
                                 {
                                     CompleteService(false, "Could not navigate to tiktok.com/messages");
                                 }
-                            }, 5000);
+                            }, 2000);
                         }
-                    }, 5000);
+                    }, 2000);
                 }
                 catch (Exception ex)
                 {
@@ -413,23 +393,20 @@ public class StreakService : Service
 
     internal void OnPageLoaded(string url)
     {
-        // Check if we're on the messages page
         if (url.Contains("tiktok.com/messages"))
         {
-            // Guard: only start the automation chain once (first page load).
-            // Subsequent friends reuse the same SPA session — inject script only (no full reload).
             if (_automationStarted) return;
             _automationStarted = true;
 
             UpdateNotification("Connecting to TikTok...");
             AppLog("NAVIGATION", "-", "Messages page ready");
-            // Wait a bit for the page to fully render, then start automation
-            _mainHandler?.PostDelayed(ProcessNextFriend, 3000);
+            
+            // تم تقليل الانتظار بعد تحميل الصفحة إلى 500ms (نصف ثانية)
+            _mainHandler?.PostDelayed(ProcessNextFriend, 500);
         }
         else if (url.Contains("login"))
         {
             AppLog("NAVIGATION", "-", "TikTok login required");
-            // User needs to login
             CompleteService(false, "TikTok login required. Please login via the app first.");
         }
     }
@@ -438,7 +415,6 @@ public class StreakService : Service
     {
         if (_isCancelRequested) return;
 
-        // When "Skip Unreachable Users" is OFF, abort the entire run on any per-user failure
         bool skipUnreachable = _settingsService?.GetSkipUnreachableUsers() ?? false;
         if (!skipUnreachable && _runResult is not null && _runResult.Failed)
         {
@@ -448,7 +424,6 @@ public class StreakService : Service
 
         if (_friendsToProcess == null || _currentFriendIndex >= _friendsToProcess.Count)
         {
-            // All friends processed — mark success only if every friend succeeded
             var allSucceeded = _runResult?.FriendResults.All(r => r.Success) ?? false;
             var completionMessage = allSucceeded
                 ? "All messages sent successfully"
@@ -476,7 +451,6 @@ public class StreakService : Service
         {
             message = _shuffledNormalMessages[_normalMessageIndex % _shuffledNormalMessages.Count];
             _normalMessageIndex++;
-            // Reshuffle when pool is exhausted so the same per-run sequence is not repeated.
             if (_normalMessageIndex >= _shuffledNormalMessages.Count)
             {
                 ShuffleList(_shuffledNormalMessages);
@@ -492,13 +466,14 @@ public class StreakService : Service
         UpdateNotification($"{_currentFriendIndex + 1}/{_friendsToProcess.Count} \u2014 Processing: {displayLabel}",
             _currentFriendIndex, _friendsToProcess.Count);
 
-        // For groups TikTok has no @handle, so we match the chat header by display name instead.
         var target = friend.IsGroup ? friend.DisplayName : friend.Username;
         if (string.IsNullOrWhiteSpace(target))
         {
             AppLog("FAIL", "-", friend.IsGroup ? "Group name is empty" : "Username is empty");
             _currentFriendIndex++;
-            _mainHandler?.PostDelayed(ProcessNextFriend, 1000);
+            
+            // تم تقليل الانتظار عند فارغ الاسم إلى 300ms
+            _mainHandler?.PostDelayed(ProcessNextFriend, 300);
             return;
         }
 
@@ -518,7 +493,6 @@ public class StreakService : Service
 
     private string GetFriendMessageScript(string target, string message, bool isGroup)
     {
-        // Escape special characters for JavaScript string literals
         target ??= string.Empty;
         message ??= string.Empty;
         var escapedTarget = target.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\"", "\\\"");
@@ -535,30 +509,28 @@ public class StreakService : Service
         if (_isCancelRequested) return;
         if (_friendsToProcess == null || _settingsService == null) return;
 
-        // The JS callback reports the target it was given: a username for DMs, or the
-        // display name for groups (groups have no @handle on TikTok).
         var friend = _friendsToProcess.FirstOrDefault(f =>
             (f.IsGroup && f.DisplayName.Equals(username, StringComparison.OrdinalIgnoreCase)) ||
             (!f.IsGroup && f.Username.Equals(username, StringComparison.OrdinalIgnoreCase)));
 
         if (friend == null)
         {
-            // Target reported by JS doesn't match any friend/group in the list. This can happen
-            // when TikTok returns a different casing/format. Retry the current friend
-            // a few times rather than silently advancing past it.
             AppLog("WARN", $"@{username}",
                 "Target from JS callback did not match any entry in the list. Retrying current friend...");
             _failureAttemptsForCurrentFriend++;
             if (_failureAttemptsForCurrentFriend < MaxSendAttemptsPerFriend)
             {
-                _mainHandler?.PostDelayed(SendCurrentFriendMessage, 3000);
+                // تم تقليل زمن إعادة المحاولة إلى 500ms
+                _mainHandler?.PostDelayed(SendCurrentFriendMessage, 500);
             }
             else
             {
                 AppLog("FAIL", $"@{username}", "Max retries exceeded for unmatched username");
                 _failureAttemptsForCurrentFriend = 0;
                 _currentFriendIndex++;
-                _mainHandler?.PostDelayed(ProcessNextFriend, 3000);
+                
+                // تم تقليل زمن الانتقال بعد الخطأ إلى 500ms
+                _mainHandler?.PostDelayed(ProcessNextFriend, 500);
             }
             return;
         }
@@ -571,7 +543,9 @@ public class StreakService : Service
             {
                 AppLog("RETRY", label,
                     $"Attempt {_failureAttemptsForCurrentFriend}/{MaxSendAttemptsPerFriend}: {error}");
-                _mainHandler?.PostDelayed(SendCurrentFriendMessage, 3000);
+                
+                // تم تقليل زمن إعادة المحاولة إلى 500ms
+                _mainHandler?.PostDelayed(SendCurrentFriendMessage, 500);
                 return;
             }
 
@@ -598,7 +572,9 @@ public class StreakService : Service
             _failureAttemptsForCurrentFriend = 0;
             _currentFriendIndex++;
             UpdateNotification($"{_currentFriendIndex}/{_friendsToProcess.Count} : Failed: {label}", _currentFriendIndex, _friendsToProcess.Count);
-            _mainHandler?.PostDelayed(ProcessNextFriend, 3000);
+            
+            // تم تقليل زمن التوقف بعد الفشل إلى 500ms
+            _mainHandler?.PostDelayed(ProcessNextFriend, 500);
             return;
         }
 
@@ -635,10 +611,13 @@ public class StreakService : Service
         if (_currentFriendIndex < totalCount)
         {
             AppLog("NAVIGATION", "-", "Next friend — injecting without reloading /messages");
-            _mainHandler?.PostDelayed(ProcessNextFriend, 3000);
+            
+            // تم تقليل وقت الانتقال للجروب أو الصديق التالي إلى 500ms (نصف ثانية)
+            _mainHandler?.PostDelayed(ProcessNextFriend, 500);
         }
         else
-            _mainHandler?.PostDelayed(ProcessNextFriend, 1000);
+            // تم تقليل وقت إنهاء العملية إلى 200ms
+            _mainHandler?.PostDelayed(ProcessNextFriend, 200);
     }
 
     private PendingIntent CreateMainActivityPendingIntent()
@@ -707,7 +686,6 @@ public class StreakService : Service
     {
         try
         {
-            // Update run result
             if (_runResult != null && _settingsService != null)
             {
                 _runResult.Success = success;
@@ -716,12 +694,10 @@ public class StreakService : Service
                 _settingsService.SetLastRunTime(DateTime.Now);
             }
 
-            // Show completion notification
             var successCount = _runResult?.FriendResults.Count(r => r.Success) ?? 0;
             var totalSent = _runResult?.FriendResults.Count ?? 0;
             var skippedCount = totalSent - successCount;
 
-            // Build human-readable summary including cooldown-skipped friends
             var cooldownNote = _cooldownSkippedCount > 0
                 ? $", {_cooldownSkippedCount} already sent"
                 : string.Empty;
@@ -761,9 +737,6 @@ public class StreakService : Service
             var notificationManager = (NotificationManager?)GetSystemService(NotificationService);
             notificationManager?.Notify(NotificationId + 1, finalNotification);
 
-            // Re-arm the scheduler if scheduling is enabled. Either:
-            //   - everything succeeded → normal next-run slot, retry counter reset
-            //   - anything failed → 1-hour retry (up to MaxRetriesPerDay), then normal slot
             if (_settingsService?.IsScheduled() == true)
             {
                 bool allSucceeded = success
@@ -790,7 +763,6 @@ public class StreakService : Service
         }
         finally
         {
-            // ── Clear the run-level mutex on ALL exit paths ──
             lock (_runLock)
             {
                 _isRunning = false;
@@ -802,9 +774,6 @@ public class StreakService : Service
         }
     }
 
-    /// <summary>
-    /// WebView client for handling page events
-    /// </summary>
     [Microsoft.Maui.Controls.Internals.Preserve(AllMembers = true)]
     private class StreakWebViewClient : WebViewClient
     {
@@ -833,14 +802,10 @@ public class StreakService : Service
                     return true;
                 }
             }
-            // Allow navigation within TikTok
             return false;
         }
     }
 
-    /// <summary>
-    /// JavaScript interface for communication from WebView
-    /// </summary>
     [Microsoft.Maui.Controls.Internals.Preserve(AllMembers = true)]
     private class StreakJsInterface : Java.Lang.Object
     {
